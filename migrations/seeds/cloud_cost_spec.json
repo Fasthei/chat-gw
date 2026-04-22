@@ -1,0 +1,727 @@
+{
+  "_source": "AI-BRAIN-API v1.1 + HANDOFF-TO-INTEGRATORS v1.1 (CloudCost, 2026-04-21)",
+  "_safety": "AI-safe read-only surface. Writes / Azure deploy / credentials / exports / sync triggers explicitly excluded. Enforced by scripts/import_cloudcost_tools.py.",
+  "base_url_env": "CLOUDCOST_API_BASE",
+  "timeout_sec": 45,
+  "roles": ["cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer"],
+  "tools": [
+    {
+      "name": "cloud_cost.health",
+      "display_name": "CloudCost Health",
+      "description": "用途: 探测 CloudCost 后端连通性。\n何时使用: 对话前做一次快速自检。\n返回: {status:'ok'}。",
+      "method": "GET",
+      "path": "/api/health",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer"]
+    },
+    {
+      "name": "cloud_cost.auth_me",
+      "display_name": "CloudCost 当前身份与可见范围",
+      "description": "用途: 返回当前 bearer token 绑定的用户信息与 visible_cloud_account_ids。\n何时使用: 回答问题前确认数据口径 (admin 全量 / null / [] / [ids]).\n出参: id/username/email/display_name/roles/visible_cloud_account_ids。",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer"]
+    },
+    {
+      "name": "cloud_cost.sync_last",
+      "display_name": "CloudCost 最近同步时间",
+      "description": "用途: 查询 CloudCost 最后一次成功同步的 ISO8601 时间 (无时区)。\n何时使用: 先确认数据新鲜度再讨论费用。\n出参: {last_sync: string|null}.",
+      "method": "GET",
+      "path": "/api/sync/last",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin", "cloud_ops"]
+    },
+
+    {
+      "name": "cloud_cost.dashboard_bundle",
+      "display_name": "CloudCost 首页聚合 Bundle",
+      "description": "用途: 单次拿首页级总览 (overview + trend + by_provider + by_service).\n何时使用: '本月云成本多少' 类宽口径问题.\n参数: month YYYY-MM 必填; granularity (daily/weekly/monthly, 默认 daily); service_limit 1-100 默认 10.",
+      "method": "GET",
+      "path": "/api/dashboard/bundle",
+      "param_map": {"month": "query", "granularity": "query", "service_limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "granularity": {"type": "string", "enum": ["daily", "weekly", "monthly"], "default": "daily"},
+          "service_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10}
+        },
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_overview",
+      "display_name": "CloudCost 月度总览卡片",
+      "description": "用途: 只拿 overview 卡片 (total_cost, prev_month_cost, mom_change_pct, active_projects).\n参数: month YYYY-MM 必填.",
+      "method": "GET",
+      "path": "/api/dashboard/overview",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}},
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_trend",
+      "display_name": "CloudCost 费用趋势",
+      "description": "用途: 多月区间内的费用趋势 (按 daily/weekly/monthly 粒度).\n参数: start / end 都是 YYYY-MM; granularity 默认 daily.",
+      "method": "GET",
+      "path": "/api/dashboard/trend",
+      "param_map": {"start": "query", "end": "query", "granularity": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "start": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "end": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "granularity": {"type": "string", "enum": ["daily", "weekly", "monthly"], "default": "daily"}
+        },
+        "required": ["start", "end"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_by_provider",
+      "display_name": "CloudCost 按云厂商拆分",
+      "description": "用途: 按 aws/gcp/azure/taiji 的月度费用与占比.\n参数: month YYYY-MM.",
+      "method": "GET",
+      "path": "/api/dashboard/by-provider",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}},
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_by_category",
+      "display_name": "CloudCost 按费用分类拆分",
+      "description": "用途: 按 categories 返回原始成本 / markup_rate / 加价后金额.\n参数: month YYYY-MM.",
+      "method": "GET",
+      "path": "/api/dashboard/by-category",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}},
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_by_project",
+      "display_name": "CloudCost 按项目 Top N",
+      "description": "用途: 月度 Top N 项目费用列表 (云厂商侧 external_project_id).\n参数: month YYYY-MM; limit 1-100 默认 10.",
+      "method": "GET",
+      "path": "/api/dashboard/by-project",
+      "param_map": {"month": "query", "limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10}
+        },
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_by_service",
+      "display_name": "CloudCost 按服务 Top N",
+      "description": "用途: 月度 Top N 服务 (product) 费用与占比.\n参数: month YYYY-MM; provider 可选 (aws/gcp/azure/taiji); limit 1-100.",
+      "method": "GET",
+      "path": "/api/dashboard/by-service",
+      "param_map": {"month": "query", "provider": "query", "limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10}
+        },
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_by_region",
+      "display_name": "CloudCost 按区域拆分",
+      "description": "用途: 月度 region 维度的费用列表.\n参数: month YYYY-MM.",
+      "method": "GET",
+      "path": "/api/dashboard/by-region",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}},
+        "required": ["month"]
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_top_growth",
+      "display_name": "CloudCost 增长排行",
+      "description": "用途: 按项目列出 growth_pct 最高的 N 个 (本周期 vs 上周期).\n参数: period 默认 '7d'; limit 1-50.",
+      "method": "GET",
+      "path": "/api/dashboard/top-growth",
+      "param_map": {"period": "query", "limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "period": {"type": "string", "default": "7d"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.dashboard_unassigned",
+      "display_name": "CloudCost 未归属项目",
+      "description": "用途: 列出账单里存在但未与本地 projects 关联的外部项目.\n参数: month YYYY-MM.",
+      "method": "GET",
+      "path": "/api/dashboard/unassigned",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}},
+        "required": ["month"]
+      }
+    },
+
+    {
+      "name": "cloud_cost.metering_summary",
+      "display_name": "CloudCost Metering 汇总",
+      "description": "用途: 日期区间/provider/服务/账号作用域内的 total_cost / total_usage / record_count / service_count.\n金额 & 用量为 string (Decimal), 调用方自行 float()。\n多选参数: account_ids / products 使用重复 query 语法.",
+      "method": "GET",
+      "path": "/api/metering/summary",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "product": "query", "products": "query",
+        "account_id": "query", "account_ids": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "product": {"type": "string"},
+          "products": {"type": "array", "items": {"type": "string"}, "description": "重复 query 语法; 非空时覆盖 product"},
+          "account_id": {"type": "integer"},
+          "account_ids": {"type": "array", "items": {"type": "integer"}, "description": "重复 query 语法; 非空时覆盖 account_id"},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.metering_daily",
+      "display_name": "CloudCost Metering 按日",
+      "description": "用途: 按日聚合 cost / usage_quantity / record_count (均为 string Decimal, 除 record_count 整型).\n作用域/筛选同 summary.",
+      "method": "GET",
+      "path": "/api/metering/daily",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "product": "query", "products": "query",
+        "account_id": "query", "account_ids": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "product": {"type": "string"},
+          "products": {"type": "array", "items": {"type": "string"}},
+          "account_id": {"type": "integer"},
+          "account_ids": {"type": "array", "items": {"type": "integer"}},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.metering_by_service",
+      "display_name": "CloudCost Metering 按服务",
+      "description": "用途: 按 product 聚合费用与用量 (Top N 分析场景).\n筛选同 summary (无 product 过滤自身).\n注意: 不同 usage_unit 的同名 product 会单独出现, unit 可能为 null.",
+      "method": "GET",
+      "path": "/api/metering/by-service",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "products": "query",
+        "account_id": "query", "account_ids": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "products": {"type": "array", "items": {"type": "string"}},
+          "account_id": {"type": "integer"},
+          "account_ids": {"type": "array", "items": {"type": "integer"}},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.metering_detail",
+      "display_name": "CloudCost Metering 明细",
+      "description": "用途: 原始明细分页. page 默认 1; page_size 默认 50, 上限 500.\n金额/用量为 string (Decimal).",
+      "method": "GET",
+      "path": "/api/metering/detail",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "product": "query", "products": "query",
+        "account_id": "query", "account_ids": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query",
+        "page": "query", "page_size": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "product": {"type": "string"},
+          "products": {"type": "array", "items": {"type": "string"}},
+          "account_id": {"type": "integer"},
+          "account_ids": {"type": "array", "items": {"type": "integer"}},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.metering_detail_count",
+      "display_name": "CloudCost Metering 明细条数",
+      "description": "用途: 在相同筛选下返回 {total}. 用于分页计算.",
+      "method": "GET",
+      "path": "/api/metering/detail/count",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "product": "query", "products": "query",
+        "account_id": "query", "account_ids": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "product": {"type": "string"},
+          "products": {"type": "array", "items": {"type": "string"}},
+          "account_id": {"type": "integer"},
+          "account_ids": {"type": "array", "items": {"type": "integer"}},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.metering_products",
+      "display_name": "CloudCost Metering 产品列表",
+      "description": "用途: 产品去重下拉, 用于 UI 或 agent 反查可用 product 名称.\n参数: provider / account_id / supply_source_id / supplier_name / data_source_id.",
+      "method": "GET",
+      "path": "/api/metering/products",
+      "param_map": {
+        "provider": "query", "account_id": "query",
+        "supply_source_id": "query", "supplier_name": "query", "data_source_id": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "account_id": {"type": "integer"},
+          "supply_source_id": {"type": "integer"},
+          "supplier_name": {"type": "string"},
+          "data_source_id": {"type": "integer"}
+        }
+      }
+    },
+
+    {
+      "name": "cloud_cost.billing_detail",
+      "display_name": "CloudCost Billing 明细",
+      "description": "用途: 计费明细分页 (区别于 metering: billing 带 project_name).\npage_size 默认 50, 上限 500. 金额/用量为 string (Decimal).",
+      "method": "GET",
+      "path": "/api/billing/detail",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "project_id": "query", "product": "query",
+        "page": "query", "page_size": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "project_id": {"type": "string", "description": "云厂商侧 project_id (非本地 projects.id)"},
+          "product": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.billing_detail_count",
+      "display_name": "CloudCost Billing 明细条数",
+      "description": "用途: 在同 billing/detail 筛选下的 {total}.",
+      "method": "GET",
+      "path": "/api/billing/detail/count",
+      "param_map": {
+        "date_start": "query", "date_end": "query",
+        "provider": "query", "project_id": "query", "product": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date_start": {"type": "string", "format": "date"},
+          "date_end": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "project_id": {"type": "string"},
+          "product": {"type": "string"}
+        }
+      }
+    },
+
+    {
+      "name": "cloud_cost.service_accounts_list",
+      "display_name": "CloudCost 服务账号列表",
+      "description": "用途: 列出本地 service accounts. 任意登录角色可读.\n入参: provider / status / customer_code / page / page_size.\n注: secret_fields 仅列出字段名, 不含值.",
+      "method": "GET",
+      "path": "/api/service-accounts/",
+      "param_map": {
+        "provider": "query", "status": "query", "customer_code": "query",
+        "page": "query", "page_size": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "status": {"type": "string", "enum": ["active", "standby", "inactive"]},
+          "customer_code": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.service_account_get",
+      "display_name": "CloudCost 服务账号详情",
+      "description": "用途: 单个服务账号 (含 history / secret_fields 字段名).\n路径参数: account_id 必填.",
+      "method": "GET",
+      "path": "/api/service-accounts/{account_id}",
+      "param_map": {"account_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"account_id": {"type": "integer", "minimum": 1}},
+        "required": ["account_id"]
+      }
+    },
+    {
+      "name": "cloud_cost.service_account_costs",
+      "display_name": "CloudCost 服务账号费用汇总",
+      "description": "用途: 指定账号 start_date..end_date 的 total_cost / services[] / daily[] / daily_by_service[]. 金额为 JSON number.\n路径: account_id; 参数: start_date / end_date 必填 YYYY-MM-DD.",
+      "method": "GET",
+      "path": "/api/service-accounts/{account_id}/costs",
+      "param_map": {"account_id": "path", "start_date": "query", "end_date": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "account_id": {"type": "integer", "minimum": 1},
+          "start_date": {"type": "string", "format": "date"},
+          "end_date": {"type": "string", "format": "date"}
+        },
+        "required": ["account_id", "start_date", "end_date"]
+      }
+    },
+    {
+      "name": "cloud_cost.service_accounts_daily_report",
+      "display_name": "CloudCost 服务账号日报",
+      "description": "用途: 统计页日报数据: 每行 (account_id, date, product) 聚合后的 cost (JSON number).\n参数: start_date / end_date 必填; provider 可选.",
+      "method": "GET",
+      "path": "/api/service-accounts/daily-report",
+      "param_map": {"start_date": "query", "end_date": "query", "provider": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "start_date": {"type": "string", "format": "date"},
+          "end_date": {"type": "string", "format": "date"},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]}
+        },
+        "required": ["start_date", "end_date"]
+      }
+    },
+
+    {
+      "name": "cloud_cost.projects_list",
+      "display_name": "CloudCost Projects 列表",
+      "description": "用途: 老 Project CRUD 的只读视图 (本地 projects 表). 前端不用, 仅历史集成.\n参数: status / provider / page / page_size.",
+      "method": "GET",
+      "path": "/api/projects/",
+      "param_map": {"status": "query", "provider": "query", "page": "query", "page_size": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "status": {"type": "string", "enum": ["active", "standby", "inactive"]},
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.project_get",
+      "display_name": "CloudCost Project 详情",
+      "description": "用途: 单个 project (本地 projects.id).\n路径: project_id 必填.",
+      "method": "GET",
+      "path": "/api/projects/{project_id}",
+      "param_map": {"project_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"project_id": {"type": "integer", "minimum": 1}},
+        "required": ["project_id"]
+      }
+    },
+    {
+      "name": "cloud_cost.project_assignment_logs",
+      "display_name": "CloudCost Project 分配日志",
+      "description": "用途: 项目的 customer/状态变更日志 (只读).\n路径: project_id 必填.",
+      "method": "GET",
+      "path": "/api/projects/{project_id}/assignment-logs",
+      "param_map": {"project_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"project_id": {"type": "integer", "minimum": 1}},
+        "required": ["project_id"]
+      }
+    },
+
+    {
+      "name": "cloud_cost.bills_list",
+      "display_name": "CloudCost 月度账单列表",
+      "description": "用途: 月度账单列表 (cloud_finance / cloud_admin).\n参数: month YYYY-MM / status / page / page_size.",
+      "method": "GET",
+      "path": "/api/bills/",
+      "param_map": {"month": "query", "status": "query", "page": "query", "page_size": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"},
+          "status": {"type": "string", "enum": ["draft", "confirmed", "paid"]},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        }
+      },
+      "roles": ["cloud_admin", "cloud_finance"]
+    },
+    {
+      "name": "cloud_cost.bill_get",
+      "display_name": "CloudCost 月度账单详情",
+      "description": "用途: 单张月度账单详情 (cloud_finance / cloud_admin).\n路径: bill_id 必填.",
+      "method": "GET",
+      "path": "/api/bills/{bill_id}",
+      "param_map": {"bill_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"bill_id": {"type": "integer", "minimum": 1}},
+        "required": ["bill_id"]
+      },
+      "roles": ["cloud_admin", "cloud_finance"]
+    },
+
+    {
+      "name": "cloud_cost.alerts_rule_status",
+      "display_name": "CloudCost 告警规则执行态",
+      "description": "用途: 查看告警规则 vs 实际用量 (触发态 / 阈值 / 当前值). 任意登录角色可读.\n参数: month YYYY-MM 可选, 默认当月.",
+      "method": "GET",
+      "path": "/api/alerts/rule-status",
+      "param_map": {"month": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}}
+      }
+    },
+    {
+      "name": "cloud_cost.alerts_rules_list",
+      "display_name": "CloudCost 告警规则列表",
+      "description": "用途: 告警规则配置只读列表. 任意登录角色可读.",
+      "method": "GET",
+      "path": "/api/alerts/rules/",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}}
+    },
+    {
+      "name": "cloud_cost.alerts_history",
+      "display_name": "CloudCost 告警历史",
+      "description": "用途: 告警历史记录.\n参数: rule_id 可选; limit 1-200 默认 50.",
+      "method": "GET",
+      "path": "/api/alerts/history",
+      "param_map": {"rule_id": "query", "limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "rule_id": {"type": "integer", "minimum": 1},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.alerts_notifications",
+      "display_name": "CloudCost 告警通知",
+      "description": "用途: 告警通知列表 (只读).\n参数: unread_only 布尔; limit 1-100 默认 30.",
+      "method": "GET",
+      "path": "/api/alerts/notifications",
+      "param_map": {"unread_only": "query", "limit": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "unread_only": {"type": "boolean"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}
+        }
+      }
+    },
+
+    {
+      "name": "cloud_cost.resources_list",
+      "display_name": "CloudCost 资源清单",
+      "description": "用途: 资源清单分页 (按可见数据源过滤).\n参数: provider / project_id / resource_type / page / page_size.",
+      "method": "GET",
+      "path": "/api/resources/",
+      "param_map": {
+        "provider": "query", "project_id": "query", "resource_type": "query",
+        "page": "query", "page_size": "query"
+      },
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "provider": {"type": "string", "enum": ["aws", "gcp", "azure", "taiji"]},
+          "project_id": {"type": "string"},
+          "resource_type": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1, "default": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}
+        }
+      }
+    },
+    {
+      "name": "cloud_cost.resource_get",
+      "display_name": "CloudCost 资源详情",
+      "description": "用途: 单个资源详情.\n路径: resource_id 必填.",
+      "method": "GET",
+      "path": "/api/resources/{resource_id}",
+      "param_map": {"resource_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"resource_id": {"type": "integer", "minimum": 1}},
+        "required": ["resource_id"]
+      }
+    },
+
+    {
+      "name": "cloud_cost.suppliers_list",
+      "display_name": "CloudCost 供应商列表 (admin)",
+      "description": "用途: 供应商列表 (suppliers 模块为 cloud_admin only).",
+      "method": "GET",
+      "path": "/api/suppliers/",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin"]
+    },
+    {
+      "name": "cloud_cost.suppliers_supply_sources_all",
+      "display_name": "CloudCost 货源全量 (admin)",
+      "description": "用途: 全部货源下拉, 可按 supplier_id 过滤.\n参数: supplier_id 可选.",
+      "method": "GET",
+      "path": "/api/suppliers/supply-sources/all",
+      "param_map": {"supplier_id": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"supplier_id": {"type": "integer", "minimum": 1}}
+      },
+      "roles": ["cloud_admin"]
+    },
+    {
+      "name": "cloud_cost.supplier_supply_sources",
+      "display_name": "CloudCost 供应商下货源 (admin)",
+      "description": "用途: 指定供应商下的货源列表.\n路径: supplier_id 必填.",
+      "method": "GET",
+      "path": "/api/suppliers/{supplier_id}/supply-sources",
+      "param_map": {"supplier_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"supplier_id": {"type": "integer", "minimum": 1}},
+        "required": ["supplier_id"]
+      },
+      "roles": ["cloud_admin"]
+    },
+
+    {
+      "name": "cloud_cost.categories_list",
+      "display_name": "CloudCost 费用分类字典 (admin)",
+      "description": "用途: 费用分类字典 (categories 模块 admin only).\nmarkup_rate 为 string (4 位小数).",
+      "method": "GET",
+      "path": "/api/categories/",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin"]
+    },
+    {
+      "name": "cloud_cost.category_get",
+      "display_name": "CloudCost 费用分类详情 (admin)",
+      "description": "用途: 单个分类 (admin).\n路径: category_id 必填.",
+      "method": "GET",
+      "path": "/api/categories/{category_id}",
+      "param_map": {"category_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"category_id": {"type": "integer", "minimum": 1}},
+        "required": ["category_id"]
+      },
+      "roles": ["cloud_admin"]
+    },
+
+    {
+      "name": "cloud_cost.exchange_rates_list",
+      "display_name": "CloudCost 汇率",
+      "description": "用途: 汇率字典 (任意登录可读).\n参数: date YYYY-MM-DD 可选; from_currency 可选.",
+      "method": "GET",
+      "path": "/api/exchange-rates/",
+      "param_map": {"date": "query", "from_currency": "query"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "date": {"type": "string", "format": "date"},
+          "from_currency": {"type": "string"}
+        }
+      }
+    },
+
+    {
+      "name": "cloud_cost.data_sources_list",
+      "display_name": "CloudCost 数据源列表 (admin)",
+      "description": "用途: 数据源列表 (data_sources 模块 admin only).",
+      "method": "GET",
+      "path": "/api/data-sources/",
+      "input_schema": {"type": "object", "additionalProperties": false, "properties": {}},
+      "roles": ["cloud_admin"]
+    },
+    {
+      "name": "cloud_cost.data_source_get",
+      "display_name": "CloudCost 数据源详情 (admin)",
+      "description": "用途: 单个数据源配置与最近同步状态.\n路径: ds_id 必填.",
+      "method": "GET",
+      "path": "/api/data-sources/{ds_id}",
+      "param_map": {"ds_id": "path"},
+      "input_schema": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"ds_id": {"type": "integer", "minimum": 1}},
+        "required": ["ds_id"]
+      },
+      "roles": ["cloud_admin"]
+    }
+  ]
+}
