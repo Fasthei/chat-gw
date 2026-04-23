@@ -41,9 +41,24 @@ def _extract_customer_code(claims: dict[str, Any], primary_claim: str) -> str | 
 
 
 async def authenticate(request: Request) -> AuthContext:
-    """FastAPI dependency: validate Bearer token and resolve roles + customer."""
+    """FastAPI dependency: validate Bearer token and resolve roles + customer.
+
+    Two identity sources are accepted:
+
+    * Casdoor — internal staff. Token carries ``roles``; resolved via
+      :class:`RoleResolver` (claim → Redis → Casdoor fallback).
+    * Gongdan ticket system — customers who logged in with a bare
+      ``customerCode`` at ``/auth/customer-login``. Token carries
+      ``role == 'CUSTOMER'`` and ``sub = customer.id`` (UUID). We skip the
+      role resolver entirely (no Casdoor account to look up), reverse-look
+      the UUID against the gongdan customer record to obtain the real
+      ``customerCode``, and emit ``roles=[]``.
+    """
     verifier: JwtVerifier = request.app.state.jwt_verifier
     resolver: RoleResolver = request.app.state.role_resolver
+    gongdan: GongdanClient | None = getattr(
+        request.app.state, "gongdan_client", None
+    )
 
     token = extract_bearer(request)
     if not token:
@@ -54,13 +69,18 @@ async def authenticate(request: Request) -> AuthContext:
     if not user_id:
         raise InvalidTokenError("token missing 'sub'")
 
+    if _is_customer_claims(claims):
+        return await _authenticate_customer(
+            claims=claims,
+            user_id=user_id,
+            token=token,
+            gongdan=gongdan,
+        )
+
     roles = await resolver.resolve(user_id, claims, raw_token=token)
 
     customer_code: str | None = None
     customer: Customer | None = None
-    gongdan: GongdanClient | None = getattr(
-        request.app.state, "gongdan_client", None
-    )
     primary_claim = getattr(
         request.app.state, "gongdan_customer_claim", "customer_code"
     )
@@ -93,5 +113,50 @@ async def authenticate(request: Request) -> AuthContext:
         customer_id=customer.id if customer else None,
         customer_tier=customer.tier if customer else None,
         customer_queue_type=customer.queue_type if customer else None,
+        claims=claims,
+    )
+
+
+def _is_customer_claims(claims: dict[str, Any]) -> bool:
+    """A gongdan-signed customer token carries ``role: 'CUSTOMER'`` as a
+    single string. Staff tokens use ``roles`` (list) — never ``role``.
+    """
+    role = claims.get("role")
+    return isinstance(role, str) and role == "CUSTOMER"
+
+
+async def _authenticate_customer(
+    *,
+    claims: dict[str, Any],
+    user_id: str,
+    token: str,
+    gongdan: GongdanClient | None,
+) -> AuthContext:
+    if gongdan is None or not gongdan.configured():
+        raise InvalidTokenError(
+            "customer token presented but gongdan client is not configured"
+        )
+    customer_uuid = str(claims.get("customerId") or user_id)
+    try:
+        customer = await gongdan.get_by_id(customer_uuid)
+    except GongdanUpstreamError as exc:
+        log.warning("gongdan upstream error resolving id=%s: %s", customer_uuid, exc)
+        raise InvalidTokenError(f"gongdan upstream error: {exc}") from exc
+    if customer is None:
+        raise InvalidTokenError(f"unknown customer id: {customer_uuid}")
+    if not customer.customer_code:
+        raise InvalidTokenError(
+            f"gongdan customer {customer_uuid} has no customerCode"
+        )
+    return AuthContext(
+        user_id=user_id,
+        roles=[],
+        raw_token=token,
+        email=claims.get("email"),
+        name=claims.get("name") or customer.name or None,
+        customer_code=customer.customer_code,
+        customer_id=customer.id or customer_uuid,
+        customer_tier=customer.tier,
+        customer_queue_type=customer.queue_type,
         claims=claims,
     )

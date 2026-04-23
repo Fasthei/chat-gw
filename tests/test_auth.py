@@ -17,6 +17,79 @@ def dev_settings() -> Settings:
     return Settings(jwt_dev_secret=DEV_SECRET, jwt_audience="chat-gw", jwt_issuer="")
 
 
+GONGDAN_SECRET = "gongdan-test-secret-abcdefghijklmnop"
+
+
+@pytest.fixture
+def gongdan_settings() -> Settings:
+    return Settings(
+        jwt_dev_secret=DEV_SECRET,
+        jwt_audience="chat-gw",
+        jwt_issuer="",
+        gongdan_jwt_secret=GONGDAN_SECRET,
+        gongdan_customer_role_value="CUSTOMER",
+    )
+
+
+def _sign_gongdan(
+    payload: dict,
+    *,
+    secret: str = GONGDAN_SECRET,
+    exp_offset: int = 900,
+) -> str:
+    full = dict(payload)
+    full.setdefault("iat", int(time.time()))
+    full.setdefault("exp", int(time.time()) + exp_offset)
+    return jwt.encode(full, secret, algorithm="HS256")
+
+
+class TestJwtVerifyGongdanCustomer:
+    @pytest.mark.asyncio
+    async def test_customer_token_verifies_against_gongdan_secret(
+        self, gongdan_settings: Settings
+    ):
+        v = JwtVerifier(gongdan_settings)
+        token = _sign_gongdan(
+            {"sub": "cust-uuid-1", "role": "CUSTOMER", "customerId": "cust-uuid-1"},
+        )
+        claims = await v.verify(token)
+        assert claims["role"] == "CUSTOMER"
+        assert claims["sub"] == "cust-uuid-1"
+
+    @pytest.mark.asyncio
+    async def test_customer_token_wrong_secret_rejected(
+        self, gongdan_settings: Settings
+    ):
+        v = JwtVerifier(gongdan_settings)
+        token = _sign_gongdan(
+            {"sub": "cust-uuid-1", "role": "CUSTOMER", "customerId": "cust-uuid-1"},
+            secret="not-the-gongdan-secret-xxxxxxxxxx",
+        )
+        with pytest.raises(InvalidTokenError):
+            await v.verify(token)
+
+    @pytest.mark.asyncio
+    async def test_staff_token_still_uses_dev_path(self, gongdan_settings: Settings):
+        v = JwtVerifier(gongdan_settings)
+        token = make_token(sub="alice", roles=["cloud_ops"])
+        claims = await v.verify(token)
+        assert claims["roles"] == ["cloud_ops"]
+
+    @pytest.mark.asyncio
+    async def test_customer_role_without_secret_configured_falls_through(
+        self, dev_settings: Settings
+    ):
+        # No gongdan_jwt_secret set → routing skips customer path; token
+        # gets treated as a staff token and rejected by Casdoor/dev path
+        # (wrong signing key here = dev secret).
+        v = JwtVerifier(dev_settings)
+        token = _sign_gongdan(
+            {"sub": "cust-uuid-1", "role": "CUSTOMER"},
+        )
+        with pytest.raises(InvalidTokenError):
+            await v.verify(token)
+
+
 class TestJwtVerifyDev:
     @pytest.mark.asyncio
     async def test_valid_token(self, dev_settings: Settings):

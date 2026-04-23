@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     gongdan_timeout_sec: float = 5.0
     gongdan_customer_claim: str = "customer_code"
 
+    # Gongdan-signed JWT (issued by ticket-system /auth/customer-login for
+    # passwordless customer login). Symmetric HS256; secret shared with
+    # gongdan's JWT_SECRET. When set, requests whose JWT carries
+    # `role == gongdan_customer_role_value` are verified against this
+    # secret instead of Casdoor JWKS. Customers have no Casdoor account.
+    gongdan_jwt_secret: str | None = None
+    gongdan_jwt_algorithm: str = "HS256"
+    gongdan_customer_role_value: str = "CUSTOMER"
+
     def is_production(self) -> bool:
         return self.app_env == "production"
 
