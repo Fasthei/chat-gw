@@ -1,9 +1,10 @@
 # chat-gw 对接手册（给做 chat 的同事）
 
 > 对接方：LobeChat / 任何 MCP client。
-> 版本：0.2.0，2026-04-23。
+> 版本：0.2.1，2026-04-24。
 > 状态：本地 Docker 与 Azure Container App 形态一致；本地已用 admin Casdoor 真实 token 跑通 68/69 工具（1 个是 CloudCost 资源表为空）。
-> **0.2.0 新增**：支持按 **customerCode** 维度授权工具（面向 LobeChat 客户），经由 gongdan 工单系统实时校验。详见 §3.4 / §9.3。
+> **0.2.1 变更（重要）**：客户身份不再走 Casdoor。客户只需输一个 `customerCode` 到工单系统 `/auth/customer-login` 拿到**工单签发的 JWT**，直接用作 `/mcp` 的 Bearer。chat-gw 按 `role: "CUSTOMER"` claim 自动识别并用 `GONGDAN_JWT_SECRET` 验签。详见 §3.4 / §7.2。
+> **0.2.0**：支持按 **customerCode** 维度授权工具，详见 §9.3。
 
 ---
 
@@ -32,7 +33,16 @@ MCP 只需要关注 `/mcp`（Streamable）或 `/mcp/sse`（传统）。
 
 ## 3. 认证（Authorization）
 
-### 3.1 Bearer JWT
+chat-gw 支持**两种独立的 JWT 签发源**，按 token 里的 `role` claim 自动路由：
+
+| 场景 | 签发方 | 算法 | 识别方式 |
+|---|---|---|---|
+| 内部员工（§3.1） | **Casdoor** | RS256 via JWKS（prod）/ HS256 `JWT_DEV_SECRET`（dev） | `role` claim 缺失或 ≠ `CUSTOMER` |
+| LobeChat 客户（§3.4） | **gongdan 工单系统** | HS256 with `GONGDAN_JWT_SECRET`（与工单后端 `JWT_SECRET` 同值） | `role: "CUSTOMER"` |
+
+两条路径彻底独立：客户 token 不查 Casdoor JWKS，员工 token 不查工单 secret。
+
+### 3.1 Bearer JWT（内部员工）
 
 每一个 `/mcp*` 请求必须带：
 
@@ -57,8 +67,9 @@ token claim 最小集：
 | `aud` | ✅（prod） | 必须包含 `JWT_AUDIENCE`（对应 Casdoor `clientId`） |
 | `exp` | ✅ | `JWT_LEEWAY_SEC=30` 容差 |
 | `roles` | 建议 | Casdoor 可能输出 `[{"name":"cloud_admin",...}]`；网关自动展开为扁平字符串数组 |
-| `customer_code` | 见 §3.4 | 客户侧登录（LobeChat）必带；`customerCode` 驼峰同样接受 |
 | `email`, `name` | 可选 | 审计列 |
+
+员工 token 里**不要**带 `role: "CUSTOMER"`，否则会被路由到客户分支并在工单系统找不到对应 UUID 而 401。
 
 ### 3.2 角色解析顺序（spec §3.3 口径）
 
@@ -73,36 +84,86 @@ token claim 最小集：
 
 `cloud_admin` / `cloud_ops` / `cloud_finance` / `cloud_viewer`（CloudCost RBAC 对齐）。仅走 §3.1 的 `roles` 通道。
 
-### 3.4 客户身份（customer_code）— LobeChat 场景
+### 3.4 客户身份（customerCode）— LobeChat 场景
 
-LobeChat 客户在 Casdoor 登录后，签发的 JWT 里需要同时携带：
+客户**没有 Casdoor 账号**，也无需密码。登录流程完全托管在工单系统：
+
+```
+┌──────────┐  customerCode  ┌──────────────────────────┐   JWT   ┌──────────┐
+│ 客户端   │ ─────────────▶ │ 工单 /auth/customer-login│ ──────▶│ LobeChat │
+│（前端）  │                └──────────────────────────┘        │          │
+└──────────┘                                                      └────┬─────┘
+                                                                        │ Bearer <JWT>
+                                                                        ▼
+                                                                 ┌──────────┐
+                                                                 │ chat-gw  │
+                                                                 │  /mcp    │
+                                                                 └──────────┘
+```
+
+#### 3.4.1 拿 token：调工单系统
+
+```http
+POST https://<GONGDAN_API_BASE>/auth/customer-login
+Content-Type: application/json
+
+{"customerCode": "CUST-C5265489"}
+```
+
+成功响应：
 
 ```json
 {
-  "sub": "<user-id-or-customer-user-id>",
-  "customer_code": "CUST-C5265489",
-  "roles": []
+  "accessToken": "<HS256-JWT 15min TTL>",
+  "refreshToken": "<HS256-JWT 7d TTL>",
+  "expiresIn": 900,
+  "user": {"id": "<uuid>", "role": "CUSTOMER", "name": "…", "customerCode": "CUST-C5265489", "tier": "…"}
 }
 ```
 
-- claim 名：**`customer_code`**（蛇形命名）或 **`customerCode`**（驼峰）均可，网关两者都接受。
-- 值格式：`CUST-XXXXXXXX`，大小写敏感，最多 32 字符。
-- 企业员工登录（`sub` 是内部员工）不需要这个 claim，省略即可。
-- 客户登录（`sub` 是客户方账号）**强烈建议只带 `customer_code` 而 `roles: []`**。如果同时带 roles，权限是 **OR 并集**（见 §4.2）。
+失败：`401 { "message": "客户编号无效，请联系运营" }`。
 
-每次带 `customer_code` 的请求，网关会**实时**调用工单系统：
+workflow 建议：前端只保留 `accessToken` 到 LobeChat 会话；`refreshToken` 在即将过期时调工单的 refresh 接口续签。工单后端用自有 Redis 保存 `jti` 黑名单，注销/续签后旧 token 失效。
+
+#### 3.4.2 token 形状
+
+工单签出的 access token payload（HS256，**无 `aud`、无 `iss`**）：
+
+```json
+{
+  "sub": "11111111-2222-3333-4444-555555555555",
+  "role": "CUSTOMER",
+  "customerId": "11111111-2222-3333-4444-555555555555",
+  "iat": 1798290300,
+  "exp": 1798291200
+}
+```
+
+- `sub` = `customerId` = gongdan `customer.id`（UUID），**不是** customerCode
+- `role: "CUSTOMER"` 是 chat-gw 的路由信号，**不要**改成别的值
+
+#### 3.4.3 用 token：直接发 `/mcp`
 
 ```
-GET https://<GONGDAN_API_BASE>/api/customers
-Headers: X-Api-Key: <GONGDAN_API_KEY>
+POST /mcp
+Authorization: Bearer <工单签的 accessToken>
 ```
 
-并在返回列表里按 `customerCode` 匹配。
+chat-gw 侧处理：
 
-- 匹配到 → 注入 `AuthContext.customer_code / customer_id / customer_tier / customer_queue_type`，继续处理。
-- 未匹配 / 上游不可达 / 网关未配置工单系统密钥 → **401**，响应体里 `detail` 给出原因（`unknown customer_code: CUST-XXX` / `gongdan upstream error: ...` / `customer_code present but gongdan is not configured`）。
+1. 解析未验签 claim，见 `role == "CUSTOMER"` → 走客户分支
+2. 用 `GONGDAN_JWT_SECRET`（必须等于工单后端 `JWT_SECRET`）HS256 验签；失败 → `401`
+3. 拿 `claims.customerId`（或 `sub`）调工单 `GET /api/customers/:id` 反查
+   - 命中 → 注入 `AuthContext.customer_code / customer_id / customer_tier / customer_queue_type`
+   - 未命中（404）/ 上游不可达 → **401**，`detail` 给出 `unknown customer id: <uuid>` / `gongdan upstream error: ...` / `customer token presented but gongdan client is not configured`
+4. **跳过 RoleResolver**（客户没有 Casdoor 角色），`AuthContext.roles = []`
+5. 权限看 §9.3 配置的 `tool_customer_grants`
 
-> 注意：网关**不缓存**客户身份。客户被删或被下线后，后续请求立刻 401。
+> 注意：网关**不缓存**客户身份。客户被删或被下线后，即使 token 还没过期，下一次请求也会立刻 401。
+
+#### 3.4.4 兼容说明（历史字段，即将废弃）
+
+0.2.0 允许 Casdoor JWT 里带 `customer_code` claim 走另一种路径；**该路径已不推荐**，保留只是向后兼容。客户侧必须走 §3.4.1 工单登录，Casdoor 不再给客户签发 token。
 
 ## 4. MCP JSON-RPC 协议
 
@@ -340,31 +401,63 @@ const { tools } = await mcp("tools/list");
 console.log(`visible tools: ${tools.length}`);
 ```
 
-### 7.2 LobeChat 客户（customer_code 通道）
+### 7.2 LobeChat 客户（customerCode → 工单签 JWT）
 
-签发 JWT 时在 claim 里放 `customer_code`：
+两步：先拿工单 token，再直连 chat-gw。
 
-```js
-// Casdoor 侧映射：把客户编号写进 JWT 的 customer_code claim
-// claim 示例
-{
-  "sub": "customer-user-42",
-  "customer_code": "CUST-C5265489",
-  "roles": [],
-  "exp": 1798291200
+```javascript
+const gongdanBase = "https://<GONGDAN_API_BASE>";
+const chatgwBase = "https://chat-gw.internal";
+
+// 第 1 步：客户输 customerCode，换工单签的 JWT
+async function customerLogin(customerCode) {
+  const r = await fetch(`${gongdanBase}/auth/customer-login`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ customerCode }),
+  });
+  if (r.status === 401) throw new Error("客户编号无效，请联系运营");
+  const { accessToken, refreshToken, expiresIn } = await r.json();
+  // 存到 LobeChat 会话；在 expiresIn-60s 时用 refreshToken 续签
+  return { accessToken, refreshToken, expiresIn };
 }
+
+// 第 2 步：用工单 token 直接发 /mcp，和员工路径完全一样
+async function mcp(token, method, params = {}) {
+  const resp = await fetch(`${chatgwBase}/mcp`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+  });
+  if (resp.status === 401) throw new Error("会话失效，请重新登录");
+  const body = await resp.json();
+  if (body.error) throw new Error(`[${body.error.code}] ${body.error.message}`);
+  return body.result;
+}
+
+const { accessToken } = await customerLogin("CUST-C5265489");
+await mcp(accessToken, "initialize", { protocolVersion: "2024-11-05" });
+const { tools } = await mcp(accessToken, "tools/list");
+// 只会看到后台给 CUST-C5265489 开通的工具（§9.3）
 ```
 
-Client 代码与 §7.1 完全一致。`tools/list` 会只返回后台给 `CUST-C5265489` 授权的工具；调用未授权工具一律 `-32001`。
+错误码处理：
 
-如果客户的 `customer_code` 被运维从工单系统下线或被改名，下一次请求立刻 `401`，client 需要提示用户"账户已失效，请联系管理员"并引导重新登录。
+- `401` 带 `detail = "客户编号无效..."` → 客户编号无效或被运维下线，引导重新输入
+- `401` 带 `detail = "unknown customer id: ..."` → token 还没过期但对应客户已从工单系统删除，引导重登
+- `401` 带 `detail = "gongdan upstream error: ..."` → 工单系统临时不可达，提示稍后重试
+- `-32001` → 这个工具未对该 customerCode 授权（§9.3），用户看到"暂无权限"
 
 ## 8. 对接检查清单
 
-- [ ] 使用 Casdoor OIDC 登录拿 access_token（**不要**再用 X-Api-Key 之类的本地密钥）
-- [ ] 客户侧 JWT 带 `customer_code`（§3.4）；企业员工带 `roles`
-- [ ] 每次 MCP 请求把 `Authorization: Bearer <token>` 带上
-- [ ] 处理 `401`（token 过期 / customer_code 未知 / 工单系统不可达）→ 刷 token or 提示"账户已失效" → 重试
+- [ ] 员工：走 Casdoor OIDC 拿 access_token（**不要**再用 X-Api-Key 之类的本地密钥）
+- [ ] 客户：走工单 `POST /auth/customer-login` 拿 access_token（§3.4.1）；客户**没有** Casdoor 账号
+- [ ] 两种 token 都直接作为 `Authorization: Bearer <token>` 发 `/mcp`，不需要区分 endpoint
+- [ ] 客户 token TTL 只有 15 分钟，在 `expiresIn - 60s` 时用 refreshToken 调工单续签
+- [ ] 处理 `401`：看响应体 `detail` 区分"token 过期"vs"客户已下线"vs"上游不可达"，分别做刷 token / 提示账户失效 / 稍后重试
 - [ ] 处理 `-32001` 的三种情形（role 不足 / customer 未授权 / 工具不存在）— 对用户表现都应是"这个工具/数据不可用"
 - [ ] 处理 `-32602` → 修正参数；通常是 JSON Schema 校验失败
 - [ ] 处理 `-32603` → 展示"系统繁忙/上游异常"并上报 `error.data.kind`
@@ -602,9 +695,10 @@ Query 参数（都可选）：
 1. **`GET /readyz`**：4 类检查 —— `postgres` / `redis` / `jwks` / `tools` 都 `ok`/`ok 69` 才算网关侧就绪。收到 503 直接告诉我们，不用猜是哪一层。
 2. **`error.data.trace_id`**（未来版本加）：每次 `tools/call` 响应里都会带 `trace_id`；遇到 `-32603` 时把这个 id 给网关侧就能反查全链路。当前版本先记 `jsonrpc id` + 你侧的 request id 即可。
 
-对于 `customer_code` 相关的 `401`，先看响应体 `detail`：
-- `unknown customer_code: ...` → 该客户在工单系统不存在或已删除，找运维确认。
-- `gongdan upstream error: ...` → 工单系统临时不可达，稍后重试；若持续出现通知网关侧 SRE。
-- `customer_code present but gongdan is not configured` → 网关部署环境变量缺失（`GONGDAN_API_BASE` / `GONGDAN_API_KEY`），直接报运维。
+对于客户 token 相关的 `401`，先看响应体 `detail`：
+- `jwt verify failed: ...` → token 过期 / 被工单系统吊销 / `GONGDAN_JWT_SECRET` 两边不一致；前两种让用户重登，第三种报网关侧 SRE
+- `unknown customer id: <uuid>` → token 合法但对应的 `customer.id` 已从工单系统删除，让用户重登；如果刚刚还能用就突然 401，运维到工单系统查客户是否被误删
+- `gongdan upstream error: ...` → 工单系统临时不可达，稍后重试；持续出现通知网关侧 SRE
+- `customer token presented but gongdan client is not configured` → 网关部署环境变量缺失（`GONGDAN_API_BASE` / `GONGDAN_API_KEY` / `GONGDAN_JWT_SECRET`），直接报运维
 
 **不要**直接连网关的 Postgres / Redis / 工单系统 / 下游后端去排障；这些都是网关内部实现，你只需要面向 `/mcp` 这一个端点。工具增删、权限调整、审计查询都由网关侧 SRE 负责。
