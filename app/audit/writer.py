@@ -27,6 +27,8 @@ async def write_audit(
     sensitive_fields_hit: list[str] | None = None,
     deny_reason: str | None = None,
     error_message: str | None = None,
+    error_code: int | None = None,
+    error_kind: str | None = None,
     latency_ms: int | None = None,
     started_at: datetime | None = None,
 ) -> None:
@@ -48,6 +50,8 @@ async def write_audit(
         status=status,
         deny_reason=deny_reason,
         error_message=error_message,
+        error_code=error_code,
+        error_kind=error_kind,
         latency_ms=latency_ms,
         started_at=started_at or now,
         finished_at=now,
@@ -78,6 +82,8 @@ class AuditWriter:
         sensitive_fields_hit: list[str] | None = None,
         deny_reason: str | None = None,
         error_message: str | None = None,
+        error_code: int | None = None,
+        error_kind: str | None = None,
         latency_ms: int | None = None,
         started_at: datetime | None = None,
     ) -> None:
@@ -92,6 +98,8 @@ class AuditWriter:
             sensitive_fields_hit=sensitive_fields_hit,
             deny_reason=deny_reason,
             error_message=error_message,
+            error_code=error_code,
+            error_kind=error_kind,
             latency_ms=latency_ms,
             started_at=started_at,
         )

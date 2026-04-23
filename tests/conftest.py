@@ -10,10 +10,15 @@ import sys
 import time
 
 # Must be set before the `app` package is imported anywhere.
-os.environ.setdefault("JWT_DEV_SECRET", "test-dev-secret-12345678")
-os.environ.setdefault("JWT_DEV_ALGORITHM", "HS256")
-os.environ.setdefault("JWT_AUDIENCE", "chat-gw")
-os.environ.setdefault("JWT_ISSUER", "")
+# Force dev-mode defaults regardless of what the committed `.env` says so
+# pytest always runs in HS256 dev verifier mode. Without this, a .env that
+# flipped APP_ENV to production would refuse to start the Settings object.
+os.environ["APP_ENV"] = "development"
+os.environ["JWT_DEV_SECRET"] = "test-dev-secret-12345678"
+os.environ["JWT_DEV_ALGORITHM"] = "HS256"
+os.environ["JWT_AUDIENCE"] = "chat-gw"
+os.environ["JWT_ISSUER"] = ""
+os.environ["JWKS_URL"] = ""
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/0")
 os.environ.setdefault("ENABLE_MCP_SSE", "false")

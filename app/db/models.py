@@ -94,6 +94,8 @@ class ToolAuditLog(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     deny_reason: Mapped[str | None] = mapped_column(String(255))
     error_message: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[int | None] = mapped_column(Integer)
+    error_kind: Mapped[str | None] = mapped_column(String(64))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

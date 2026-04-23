@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 
+from app.admin import build_audit_router, build_grants_router, build_tools_router
 from app.api.errors import auth_error_handler
 from app.api.health import build_health_router
 from app.audit import AuditWriter
@@ -152,6 +153,10 @@ def create_app() -> FastAPI:
     app.include_router(build_streamable_router())
     if settings.enable_mcp_sse:
         app.include_router(build_sse_router())
+    # /admin/* — cloud_admin only (enforced per-router via require_role)
+    app.include_router(build_tools_router())
+    app.include_router(build_grants_router())
+    app.include_router(build_audit_router())
     return app
 
 

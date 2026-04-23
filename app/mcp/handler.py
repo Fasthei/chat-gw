@@ -124,6 +124,8 @@ class McpHandler:
                 arguments=arguments,
                 status="denied",
                 deny_reason="not_found_or_no_role",
+                error_code=TOOL_NOT_FOUND,
+                error_kind="not_found_or_no_role",
             )
             return jsonrpc_error(req_id, TOOL_NOT_FOUND, f"tool '{name}' not found")
 
@@ -140,6 +142,8 @@ class McpHandler:
                 tool_id=tool.id,
                 sensitive_fields_hit=scan_sensitive_fields(arguments),
                 error_message=f"schema: {exc.message}",
+                error_code=INVALID_PARAMS,
+                error_kind="schema_validation",
                 latency_ms=latency_ms,
             )
             return jsonrpc_error(req_id, INVALID_PARAMS, f"invalid params: {exc.message}")
@@ -157,6 +161,8 @@ class McpHandler:
                 tool_id=tool.id,
                 sensitive_fields_hit=sensitive_hit,
                 error_message=f"unknown dispatcher: {tool.dispatcher}",
+                error_code=INTERNAL_ERROR,
+                error_kind="unknown_dispatcher",
                 latency_ms=latency_ms,
             )
             return jsonrpc_error(req_id, INTERNAL_ERROR, f"unknown dispatcher: {tool.dispatcher}")
@@ -175,6 +181,8 @@ class McpHandler:
                 tool_id=tool.id,
                 sensitive_fields_hit=sensitive_hit,
                 error_message=f"{exc.kind}: {exc.message}",
+                error_code=exc.mcp_code,
+                error_kind=exc.kind,
                 latency_ms=latency_ms,
             )
             data: dict[str, Any] = {"kind": exc.kind}
@@ -193,6 +201,8 @@ class McpHandler:
                 tool_id=tool.id,
                 sensitive_fields_hit=sensitive_hit,
                 error_message=str(exc),
+                error_code=INTERNAL_ERROR,
+                error_kind="internal_error",
                 latency_ms=latency_ms,
             )
             return jsonrpc_error(req_id, INTERNAL_ERROR, f"internal error: {exc}")
