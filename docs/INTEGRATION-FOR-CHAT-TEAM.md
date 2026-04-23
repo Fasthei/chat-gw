@@ -308,7 +308,189 @@ console.log(content[0].text);  // JSON string of the overview
 - [ ] 订阅 SSE (`GET /mcp` 或 `/mcp/sse`) 接收 `notifications/tools/list_changed`，重新拉 `tools/list`
 - [ ] 记录每次 `tools/call` 的 `jsonrpc.id` / client-side request id；排障时交给网关侧 SRE 反查即可（审计链路由网关侧负责，对接方不直连后端）
 
-## 9. 故障自查 / 反馈
+## 9. Admin API（仅 `cloud_admin`）
+
+管理面，供你们实现"工具目录管理 / 角色授权矩阵 / 审计日志"三个页面用。**所有 `/admin/*` 都复用同一套 Bearer JWT 认证**，没有第二套；额外加一道 `cloud_admin` 角色闸门（非 `cloud_admin` 一律 `403`）。
+
+### 9.1 工具注册表 CRUD
+
+#### `GET /admin/tools?include_disabled=true`
+
+```json
+{
+  "tools": [
+    {
+      "name": "kb.search",
+      "display_name": "KB Search",
+      "description": "用途: 搜索内部知识库…",
+      "category": "kb",
+      "dispatcher": "http_adapter",
+      "config": { "base_url_env": "KB_AGENT_URL", "path": "/api/v1/search", "method": "POST", "timeout_sec": 15 },
+      "auth_mode": "service_key",
+      "secret_env_name": "KB_AGENT_API_KEY",
+      "auth_header": "api-key",
+      "auth_prefix": "",
+      "input_schema": { "...": "..." },
+      "output_schema": null,
+      "enabled": true,
+      "version": 1,
+      "created_at": "2026-04-22T03:35:00Z",
+      "updated_at": "2026-04-22T03:35:00Z"
+    }
+  ]
+}
+```
+
+`include_disabled=false` 时只返回 `enabled=true` 的行。默认按 `category, name` 排序。
+
+#### `POST /admin/tools`（upsert by `name`）
+
+Body = 完整 tool 定义（省略 `id/version/created_at/updated_at` — 这 4 个由后端管理）：
+
+```json
+{
+  "name": "cloud_cost.dashboard_overview",
+  "display_name": "CloudCost Dashboard Overview",
+  "description": "…",
+  "category": "cloud_cost",
+  "dispatcher": "http_adapter",
+  "config": {"base_url_env":"CLOUDCOST_API_BASE","method":"GET","path":"/api/v1/dashboard/overview","timeout_sec":45,"retries":0},
+  "auth_mode": "user_passthrough",
+  "secret_env_name": null,
+  "auth_header": "Authorization",
+  "auth_prefix": "Bearer ",
+  "input_schema": {"type":"object","properties":{"month":{"type":"string","pattern":"^\\d{4}-\\d{2}$"}},"required":["month"]},
+  "output_schema": null,
+  "enabled": true
+}
+```
+
+Response：整行新值。首次插入 `version=1`；每次 upsert `version += 1`。
+
+**约束**：
+- `dispatcher` ∈ `http_adapter | mcp_proxy | daytona_sandbox`
+- `auth_mode` ∈ `service_key | user_passthrough`
+- `name` 是主键、幂等键
+
+#### `PATCH /admin/tools/{name}`
+
+任意字段子集（不含 `name`）。空 body 返回 400。不存在返回 404。
+
+```json
+// body
+{ "enabled": false, "description": "新说明" }
+```
+
+Response：整行新值，`version` 自增。
+
+#### `DELETE /admin/tools/{name}?hard=false`
+
+- 默认 `hard=false` → 软删：`enabled=false`，行保留（可还原）
+- `hard=true` → 物理删除；`tool_role_grants` 级联清理
+
+返回 `204`。
+
+### 9.2 角色-工具授权 CRUD
+
+#### `GET /admin/tool-role-grants?role=&tool_name=`
+
+```json
+{
+  "grants": [
+    {"role": "cloud_admin",   "tool_name": "cloud_cost.dashboard_overview"},
+    {"role": "cloud_ops",     "tool_name": "sales.list_customers"}
+  ]
+}
+```
+
+可选 `role` / `tool_name` 过滤（精确匹配）。当前生产 220 条（admin 69 / ops 60 / finance 51 / viewer 40）。前端可以用它画 4×69 矩阵。
+
+#### `PUT /admin/tool-role-grants`
+
+```json
+{ "role": "cloud_ops", "tool_name": "cloud_cost.bills_list", "granted": true }
+```
+
+- `granted: true` → INSERT ON CONFLICT DO NOTHING（幂等，可反复调）
+- `granted: false` → DELETE（幂等，删不存在的不报错）
+
+Response：回显同 3 个字段，表示当前意愿的最终状态。
+
+**约束**：`role` ∈ `cloud_admin | cloud_ops | cloud_finance | cloud_viewer`；`tool_name` 必须已存在（否则 `404`）。
+
+#### `DELETE /admin/tool-role-grants?role=&tool_name=`
+
+和 `PUT {..., granted:false}` 等价，返回 `204`。
+
+### 9.3 审计日志查询
+
+#### `GET /admin/audit`
+
+Query 参数（都可选）：
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `user_id` | string | 精确匹配 `AuthContext.user_id`（等于 JWT `sub`） |
+| `tool_name` | string | 精确匹配 |
+| `outcome` | `allowed\|denied\|error\|ok` | 单值枚举 |
+| `from` | ISO 8601 datetime | `started_at >= from`（含） |
+| `to` | ISO 8601 datetime | `started_at < to`（不含） |
+| `trace_id` | string | 定位单次调用 |
+| `cursor` | opaque string | 上一页 response 的 `next_cursor` |
+| `limit` | int | 默认 50，最大 500 |
+
+**分页用 keyset cursor，不是 offset**。响应：
+
+```json
+{
+  "items": [
+    {
+      "trace_id": "0c4e…",
+      "at": "2026-04-23T10:20:30Z",
+      "user_id": "0ab89d4c-9741-4edb-…",
+      "user_email": "admin@example.com",
+      "roles": ["cloud_admin"],
+      "tool_name": "cloud_cost.dashboard_overview",
+      "tool_id": 42,
+      "outcome": "ok",
+      "error_code": null,
+      "error_kind": null,
+      "latency_ms": 1023,
+      "deny_reason": null,
+      "error_message": null,
+      "sensitive_fields_hit": [],
+      "arguments": {"month": "2026-04"}
+    }
+  ],
+  "next_cursor": "eyJhdCI6IjIwMjYt…"
+}
+```
+
+- `error_code` = JSON-RPC error code（`-32001` / `-32602` / `-32603`）
+- `error_kind` = 网关侧分类：`not_found_or_no_role` / `schema_validation` / `upstream_denied` / `upstream_error` / `upstream_timeout` / `config_error` / …
+- `sensitive_fields_hit` = 敏感字段 key 名，前端渲染 `arguments` 时建议对这些 key 打码（`arguments` 本身原文保留，spec §4.3）
+- 按 `(started_at DESC, id DESC)` 排序
+
+**分页使用方式**：第一页传 `?limit=50`；response 里如果 `next_cursor` 非 null，下一页传 `?limit=50&cursor=<上一页 next_cursor>`；直到 `next_cursor` 为 null。
+
+### 9.4 错误
+
+| HTTP | 场景 |
+|---|---|
+| `401` | 无 Bearer 或 JWT 无效 |
+| `403` | JWT 有效但不含 `cloud_admin` |
+| `404` | 工具/授权目标不存在 |
+| `400` | 空 PATCH / 无效 cursor |
+| `422` | Pydantic schema 拒绝（角色枚举、dispatcher 枚举越界等） |
+
+### 9.5 热更新
+
+写操作（POST/PATCH/DELETE tools、PUT/DELETE grants）成功后：
+- 本实例立即刷新 30s 内存缓存
+- Postgres 触发 `tools_changed` 通知，其它 gateway 实例 30s 内同步
+- 对所有打开 SSE 会话的 client 推送 `notifications/tools/list_changed`
+
+## 10. 故障自查 / 反馈
 
 对接方能自己做的两步：
 
