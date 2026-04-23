@@ -125,7 +125,7 @@ Content-Type: application/json
 }
 ```
 
-当注册表变更时（Postgres LISTEN/NOTIFY 触发），网关通过已打开的 SSE 通道下推 `notifications/tools/list_changed`，client 应重调 `tools/list`。
+当网关侧工具注册表发生变更（上/下架、权限调整等），网关通过已打开的 SSE 通道下推 `notifications/tools/list_changed`，client 应重调 `tools/list` 刷新缓存。
 
 ### 4.3 `tools/call`
 
@@ -306,10 +306,13 @@ console.log(content[0].text);  // JSON string of the overview
 - [ ] 处理 `-32603` → 展示"系统繁忙/上游异常"并上报 `error.data.kind`
 - [ ] 从 `tools/list` 拿到的 `inputSchema` 做前端/agent 参数校验
 - [ ] 订阅 SSE (`GET /mcp` 或 `/mcp/sse`) 接收 `notifications/tools/list_changed`，重新拉 `tools/list`
-- [ ] 审计：调用 id 可在 `chat_gw.tool_audit_log` 里以 trace_id 反查
+- [ ] 记录每次 `tools/call` 的 `jsonrpc.id` / client-side request id；排障时交给网关侧 SRE 反查即可（审计链路由网关侧负责，对接方不直连后端）
 
-## 9. 运维联系
+## 9. 故障自查 / 反馈
 
-- 故障：检查 `/readyz`（postgres / redis / jwks / tools 四类 OK 即可判断）
-- 审计：Postgres `chat_gw.tool_audit_log`，按 `user_id` / `tool_name` / `trace_id` 查
-- 热更新工具：修改 `chat_gw.tools` / `chat_gw.tool_role_grants` → LISTEN/NOTIFY 通知 → 30s 内或立即生效
+对接方能自己做的两步：
+
+1. **`GET /readyz`**：4 类检查 —— `postgres` / `redis` / `jwks` / `tools` 都 `ok`/`ok 69` 才算网关侧就绪。收到 503 直接告诉我们，不用猜是哪一层。
+2. **`error.data.trace_id`**（未来版本加）：每次 `tools/call` 响应里都会带 `trace_id`；遇到 `-32603` 时把这个 id 给网关侧就能反查全链路。当前版本先记 `jsonrpc id` + 你侧的 request id 即可。
+
+**不要**直接连网关的 Postgres / Redis / 下游后端去排障；这些都是网关内部实现，你只需要面向 `/mcp` 这一个端点。工具增删、权限调整、审计查询都由网关侧 SRE 负责。
