@@ -60,6 +60,14 @@ class Settings(BaseSettings):
 
     enable_mcp_sse: bool = True
 
+    # ─── Gongdan (ticket system) integration ──────────────────────────
+    # Resolves the `customer_code` carried in JWT claims to a real customer
+    # by calling the gongdan API on every request (no cache — real-time).
+    gongdan_api_base: str | None = None
+    gongdan_api_key: str | None = None
+    gongdan_timeout_sec: float = 5.0
+    gongdan_customer_claim: str = "customer_code"
+
     def is_production(self) -> bool:
         return self.app_env == "production"
 

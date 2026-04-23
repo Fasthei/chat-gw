@@ -15,6 +15,10 @@ class ToolView:
     """Immutable snapshot of a Tool row used by MCP + dispatchers.
 
     Decouples request-handling from SQLAlchemy session lifetime.
+
+    A tool is visible to a principal when *either* set below intersects the
+    principal's identity: role grants (``roles``) OR customer-code grants
+    (``customer_codes``). See ``ToolRegistry.list_for_principal``.
     """
 
     id: int
@@ -31,9 +35,14 @@ class ToolView:
     input_schema: dict = field(default_factory=dict)
     output_schema: dict | None = None
     roles: frozenset[str] = field(default_factory=frozenset)
+    customer_codes: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
     def from_model(cls, t: Tool) -> "ToolView":
+        # ``customer_grants`` is defensive: older fixtures (and the existing
+        # test stubs in tests/test_asgi.py / test_mcp_handler.py / test_registry.py)
+        # only set ``grants``. Treat a missing attribute as an empty set.
+        customer_grants = getattr(t, "customer_grants", None) or []
         return cls(
             id=t.id,
             name=t.name,
@@ -49,6 +58,7 @@ class ToolView:
             input_schema=dict(t.input_schema or {}),
             output_schema=dict(t.output_schema) if t.output_schema else None,
             roles=frozenset(g.role for g in t.grants),
+            customer_codes=frozenset(g.customer_code for g in customer_grants),
         )
 
 

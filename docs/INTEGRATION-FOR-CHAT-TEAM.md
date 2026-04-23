@@ -1,8 +1,9 @@
 # chat-gw 对接手册（给做 chat 的同事）
 
 > 对接方：LobeChat / 任何 MCP client。
-> 版本：0.1.0，2026-04-22。
+> 版本：0.2.0，2026-04-23。
 > 状态：本地 Docker 与 Azure Container App 形态一致；本地已用 admin Casdoor 真实 token 跑通 68/69 工具（1 个是 CloudCost 资源表为空）。
+> **0.2.0 新增**：支持按 **customerCode** 维度授权工具（面向 LobeChat 客户），经由 gongdan 工单系统实时校验。详见 §3.4 / §9.3。
 
 ---
 
@@ -56,6 +57,7 @@ token claim 最小集：
 | `aud` | ✅（prod） | 必须包含 `JWT_AUDIENCE`（对应 Casdoor `clientId`） |
 | `exp` | ✅ | `JWT_LEEWAY_SEC=30` 容差 |
 | `roles` | 建议 | Casdoor 可能输出 `[{"name":"cloud_admin",...}]`；网关自动展开为扁平字符串数组 |
+| `customer_code` | 见 §3.4 | 客户侧登录（LobeChat）必带；`customerCode` 驼峰同样接受 |
 | `email`, `name` | 可选 | 审计列 |
 
 ### 3.2 角色解析顺序（spec §3.3 口径）
@@ -67,9 +69,40 @@ token claim 最小集：
 
 同一 `sub` 先 admin 后 viewer，第二次**不会**继承 admin 缓存。
 
-### 3.3 四个角色
+### 3.3 四个企业角色
 
-`cloud_admin` / `cloud_ops` / `cloud_finance` / `cloud_viewer`（CloudCost RBAC 对齐）。
+`cloud_admin` / `cloud_ops` / `cloud_finance` / `cloud_viewer`（CloudCost RBAC 对齐）。仅走 §3.1 的 `roles` 通道。
+
+### 3.4 客户身份（customer_code）— LobeChat 场景
+
+LobeChat 客户在 Casdoor 登录后，签发的 JWT 里需要同时携带：
+
+```json
+{
+  "sub": "<user-id-or-customer-user-id>",
+  "customer_code": "CUST-C5265489",
+  "roles": []
+}
+```
+
+- claim 名：**`customer_code`**（蛇形命名）或 **`customerCode`**（驼峰）均可，网关两者都接受。
+- 值格式：`CUST-XXXXXXXX`，大小写敏感，最多 32 字符。
+- 企业员工登录（`sub` 是内部员工）不需要这个 claim，省略即可。
+- 客户登录（`sub` 是客户方账号）**强烈建议只带 `customer_code` 而 `roles: []`**。如果同时带 roles，权限是 **OR 并集**（见 §4.2）。
+
+每次带 `customer_code` 的请求，网关会**实时**调用工单系统：
+
+```
+GET https://<GONGDAN_API_BASE>/api/customers
+Headers: X-Api-Key: <GONGDAN_API_KEY>
+```
+
+并在返回列表里按 `customerCode` 匹配。
+
+- 匹配到 → 注入 `AuthContext.customer_code / customer_id / customer_tier / customer_queue_type`，继续处理。
+- 未匹配 / 上游不可达 / 网关未配置工单系统密钥 → **401**，响应体里 `detail` 给出原因（`unknown customer_code: CUST-XXX` / `gongdan upstream error: ...` / `customer_code present but gongdan is not configured`）。
+
+> 注意：网关**不缓存**客户身份。客户被删或被下线后，后续请求立刻 401。
 
 ## 4. MCP JSON-RPC 协议
 
@@ -98,7 +131,7 @@ Content-Type: application/json
   "id": 1,
   "result": {
     "protocolVersion": "2024-11-05",
-    "serverInfo": { "name": "chat-gw", "version": "0.1.0" },
+    "serverInfo": { "name": "chat-gw", "version": "0.2.0" },
     "capabilities": { "tools": { "listChanged": true } }
   }
 }
@@ -106,7 +139,18 @@ Content-Type: application/json
 
 ### 4.2 `tools/list`
 
-返回**仅**调用方角色可见的工具。响应项：`name` / `description` / `inputSchema`（JSON Schema）。
+返回**调用方可见**的工具集合。可见性是 **OR 并集**：
+
+```
+可见(tool) = (tool.roles ∩ JWT.roles) ≠ ∅
+           ∨ (JWT.customer_code ∈ tool.customer_codes)
+```
+
+- 企业员工（有 `roles`，无 `customer_code`）→ 只走 role 通道，行为与 0.1.x 完全一致。
+- LobeChat 客户（`roles: []`，有 `customer_code`）→ 只走 customer 通道，只能看到后台为该客户配置的工具。
+- 两者并存 → 取并集。
+
+响应项：`name` / `description` / `inputSchema`（JSON Schema）。
 
 ```json
 { "jsonrpc":"2.0", "id":2, "method":"tools/list" }
@@ -118,14 +162,13 @@ Content-Type: application/json
   "id": 2,
   "result": {
     "tools": [
-      { "name": "kb.search", "description": "用途: 搜索内部知识库...", "inputSchema": { "...": "..." } },
-      ...
+      { "name": "kb.search", "description": "用途: 搜索内部知识库...", "inputSchema": { "...": "..." } }
     ]
   }
 }
 ```
 
-当网关侧工具注册表发生变更（上/下架、权限调整等），网关通过已打开的 SSE 通道下推 `notifications/tools/list_changed`，client 应重调 `tools/list` 刷新缓存。
+当网关侧工具注册表发生变更（上/下架、role 授权调整、customer 授权调整），网关通过已打开的 SSE 通道下推 `notifications/tools/list_changed`，client 应重调 `tools/list` 刷新缓存。
 
 ### 4.3 `tools/call`
 
@@ -159,6 +202,8 @@ Content-Type: application/json
 { "result": { "content": [...], "isError": true } }
 ```
 
+鉴权同样走 §4.2 的 OR 并集：客户未被授权的工具和不存在的工具都返回 `-32001`，不暴露工具枚举。
+
 ### 4.4 通知
 
 - `notifications/initialized`（client → server）：无需回包。
@@ -169,15 +214,17 @@ Content-Type: application/json
 
 | code | 场景 | `error.data.kind` 可能值 |
 |---|---|---|
-| `-32001` | 工具不存在 **或** 角色不足 **或** 上游 401/403/404 | `not_found` / `no_role` / `upstream_denied` / `upstream_not_found` / `remote_mcp_error` |
+| `-32001` | 工具不存在 **或** role 不足 **或** customer_code 未被授权 **或** 上游 401/403/404 | `not_found` / `no_role` / `upstream_denied` / `upstream_not_found` / `remote_mcp_error` |
 | `-32602` | JSON Schema 校验失败 / 上游 400 | `invalid_params` / `upstream_bad_request` |
 | `-32603` | 内部错误 / 上游 5xx / 超时 / 配置缺失 | `internal_error` / `upstream_error` / `upstream_timeout` / `config_error` / `mcp_proxy_not_ready` |
 
-**注意**：网关故意把"工具不存在"和"无权限"合并为 `-32001`，防角色枚举。
+**注意**：网关故意把"工具不存在"、"role 不足"、"customer 未授权"合并为 `-32001`，防枚举。审计日志里用 `error_kind = "not_found_or_no_role"` 兜起这三种情况（历史兼容名，语义现在包含 customer 维度）。
+
+**HTTP 层 `401`**：`customer_code` 无效 / 工单系统不可达 / JWT 本身无效。与 `-32001` 不同，`401` 不会进入 JSON-RPC 流程，直接在传输层返回。
 
 ## 6. 工具目录（截至本版本 69 个）
 
-按 category 分组；名字格式 `<domain>.<action>`。可见性列 A=cloud_admin / O=cloud_ops / F=cloud_finance / V=cloud_viewer。详细 input_schema 直接看 `tools/list` 返回。
+按 category 分组；名字格式 `<domain>.<action>`。可见性列 A=cloud_admin / O=cloud_ops / F=cloud_finance / V=cloud_viewer。**customer_code 授权是第二条独立通道**，不体现在这张矩阵里 —— 任何工具都可以按 customer 维度额外授权，详见 §9.3。详细 input_schema 直接看 `tools/list` 返回。
 
 ### 6.1 kb（1）
 
@@ -263,12 +310,15 @@ AI-safe 子集，GET-only；禁止集合（由 importer 强制）：credentials 
 
 **多选 query 参数**：`cloud_cost.metering_*` 的 `account_ids` / `products` 必须用重复 query 语法（`?account_ids=1&account_ids=2`）；input_schema `type: array` 即可，网关 + httpx 自动展开。
 
+> **关于 customer_code 能用哪些工具**：没有固定清单，完全看 §9.3 后台怎么配。默认情况下**没有任何工具**对某个 `customer_code` 开放 —— 必须运维在后台执行 `PUT /admin/tool-customer-grants` 明确开通。
+
 ## 7. 最小对接示例
 
+### 7.1 企业员工（roles 通道）
+
 ```javascript
-// pseudo-code (any MCP client)
 const base = "https://chat-gw.internal";
-const token = /* 从 Casdoor OIDC 登录获得的 access_token */;
+const token = /* Casdoor OIDC access_token, claims 含 roles: ["cloud_admin"] */;
 
 async function mcp(method, params = {}) {
   const resp = await fetch(`${base}/mcp`, {
@@ -288,20 +338,34 @@ async function mcp(method, params = {}) {
 await mcp("initialize", { protocolVersion: "2024-11-05" });
 const { tools } = await mcp("tools/list");
 console.log(`visible tools: ${tools.length}`);
-
-const { content } = await mcp("tools/call", {
-  name: "cloud_cost.dashboard_overview",
-  arguments: { month: "2026-04" },
-});
-console.log(content[0].text);  // JSON string of the overview
 ```
+
+### 7.2 LobeChat 客户（customer_code 通道）
+
+签发 JWT 时在 claim 里放 `customer_code`：
+
+```js
+// Casdoor 侧映射：把客户编号写进 JWT 的 customer_code claim
+// claim 示例
+{
+  "sub": "customer-user-42",
+  "customer_code": "CUST-C5265489",
+  "roles": [],
+  "exp": 1798291200
+}
+```
+
+Client 代码与 §7.1 完全一致。`tools/list` 会只返回后台给 `CUST-C5265489` 授权的工具；调用未授权工具一律 `-32001`。
+
+如果客户的 `customer_code` 被运维从工单系统下线或被改名，下一次请求立刻 `401`，client 需要提示用户"账户已失效，请联系管理员"并引导重新登录。
 
 ## 8. 对接检查清单
 
 - [ ] 使用 Casdoor OIDC 登录拿 access_token（**不要**再用 X-Api-Key 之类的本地密钥）
+- [ ] 客户侧 JWT 带 `customer_code`（§3.4）；企业员工带 `roles`
 - [ ] 每次 MCP 请求把 `Authorization: Bearer <token>` 带上
-- [ ] 处理 401 → 刷 token → 重试
-- [ ] 处理 `-32001` 的两种情形（权限不够 vs 工具不存在）— 对用户表现都应是"这个工具/数据不可用"
+- [ ] 处理 `401`（token 过期 / customer_code 未知 / 工单系统不可达）→ 刷 token or 提示"账户已失效" → 重试
+- [ ] 处理 `-32001` 的三种情形（role 不足 / customer 未授权 / 工具不存在）— 对用户表现都应是"这个工具/数据不可用"
 - [ ] 处理 `-32602` → 修正参数；通常是 JSON Schema 校验失败
 - [ ] 处理 `-32603` → 展示"系统繁忙/上游异常"并上报 `error.data.kind`
 - [ ] 从 `tools/list` 拿到的 `inputSchema` 做前端/agent 参数校验
@@ -310,7 +374,7 @@ console.log(content[0].text);  // JSON string of the overview
 
 ## 9. Admin API（仅 `cloud_admin`）
 
-管理面，供你们实现"工具目录管理 / 角色授权矩阵 / 审计日志"三个页面用。**所有 `/admin/*` 都复用同一套 Bearer JWT 认证**，没有第二套；额外加一道 `cloud_admin` 角色闸门（非 `cloud_admin` 一律 `403`）。
+管理面，供你们实现"工具目录管理 / 角色授权矩阵 / 客户授权矩阵 / 审计日志"四个页面用。**所有 `/admin/*` 都复用同一套 Bearer JWT 认证**，没有第二套；额外加一道 `cloud_admin` 角色闸门（非 `cloud_admin` 一律 `403`）。
 
 ### 9.1 工具注册表 CRUD
 
@@ -377,7 +441,6 @@ Response：整行新值。首次插入 `version=1`；每次 upsert `version += 1
 任意字段子集（不含 `name`）。空 body 返回 400。不存在返回 404。
 
 ```json
-// body
 { "enabled": false, "description": "新说明" }
 ```
 
@@ -386,7 +449,7 @@ Response：整行新值，`version` 自增。
 #### `DELETE /admin/tools/{name}?hard=false`
 
 - 默认 `hard=false` → 软删：`enabled=false`，行保留（可还原）
-- `hard=true` → 物理删除；`tool_role_grants` 级联清理
+- `hard=true` → 物理删除；`tool_role_grants` + `tool_customer_grants` 级联清理
 
 返回 `204`。
 
@@ -422,7 +485,49 @@ Response：回显同 3 个字段，表示当前意愿的最终状态。
 
 和 `PUT {..., granted:false}` 等价，返回 `204`。
 
-### 9.3 审计日志查询
+### 9.3 客户-工具授权 CRUD（LobeChat 场景）
+
+与 §9.2 完全对称，只是主体从 `role` 换成了工单系统的 `customer_code`。**授权效果与 role 通道 OR 合并**（见 §4.2）。
+
+#### `GET /admin/tool-customer-grants?customer_code=&tool_name=`
+
+```json
+{
+  "grants": [
+    {"customer_code": "CUST-C5265489", "tool_name": "kb.search"},
+    {"customer_code": "CUST-C5265489", "tool_name": "jina.search"},
+    {"customer_code": "CUST-ADD51990", "tool_name": "sandbox.run_python"}
+  ]
+}
+```
+
+可选 `customer_code` / `tool_name` 精确匹配过滤。前端可以用这张表画"客户 × 工具"矩阵，左侧维度由工单系统 `GET /api/customers` 列表驱动（客户由工单系统托管，chat-gw 不存客户主档）。
+
+#### `PUT /admin/tool-customer-grants`
+
+```json
+{ "customer_code": "CUST-C5265489", "tool_name": "kb.search", "granted": true }
+```
+
+- `granted: true` → INSERT ON CONFLICT DO NOTHING（幂等）
+- `granted: false` → DELETE（幂等）
+
+Response：回显同 3 个字段。
+
+**约束**：
+- `customer_code` 必须匹配 `^[A-Za-z0-9_-]{1,32}$`，建议严格使用工单系统发出的 `CUST-XXXXXXXX`。
+- `tool_name` 必须已存在（否则 `404`）。
+- 网关**不校验**该 customer_code 是否真实存在于工单系统；运维可以为"尚未注册"的客户预先配置工具，等客户登录时网关会在 §3.4 环节实时校验客户是否真实存在。
+
+#### `DELETE /admin/tool-customer-grants?customer_code=&tool_name=`
+
+和 `PUT {..., granted:false}` 等价，返回 `204`。
+
+#### 热更新
+
+任何 `PUT` / `DELETE` 成功后，Postgres 触发 `tools_changed` 通知，所有 gateway 实例在 30s 内同步并通过 SSE 推送 `notifications/tools/list_changed` —— 客户无需重登即能看到新工具。
+
+### 9.4 审计日志查询
 
 #### `GET /admin/audit`
 
@@ -467,25 +572,25 @@ Query 参数（都可选）：
 ```
 
 - `error_code` = JSON-RPC error code（`-32001` / `-32602` / `-32603`）
-- `error_kind` = 网关侧分类：`not_found_or_no_role` / `schema_validation` / `upstream_denied` / `upstream_error` / `upstream_timeout` / `config_error` / …
+- `error_kind` = 网关侧分类：`not_found_or_no_role`（role 不足或 customer 未授权） / `schema_validation` / `upstream_denied` / `upstream_error` / `upstream_timeout` / `config_error` / …
 - `sensitive_fields_hit` = 敏感字段 key 名，前端渲染 `arguments` 时建议对这些 key 打码（`arguments` 本身原文保留，spec §4.3）
 - 按 `(started_at DESC, id DESC)` 排序
 
 **分页使用方式**：第一页传 `?limit=50`；response 里如果 `next_cursor` 非 null，下一页传 `?limit=50&cursor=<上一页 next_cursor>`；直到 `next_cursor` 为 null。
 
-### 9.4 错误
+### 9.5 错误
 
 | HTTP | 场景 |
 |---|---|
-| `401` | 无 Bearer 或 JWT 无效 |
+| `401` | 无 Bearer / JWT 无效 / `customer_code` 校验失败 |
 | `403` | JWT 有效但不含 `cloud_admin` |
 | `404` | 工具/授权目标不存在 |
 | `400` | 空 PATCH / 无效 cursor |
-| `422` | Pydantic schema 拒绝（角色枚举、dispatcher 枚举越界等） |
+| `422` | Pydantic schema 拒绝（角色枚举、dispatcher 枚举越界、`customer_code` 格式违规等） |
 
-### 9.5 热更新
+### 9.6 热更新
 
-写操作（POST/PATCH/DELETE tools、PUT/DELETE grants）成功后：
+写操作（POST/PATCH/DELETE tools、PUT/DELETE role grants、PUT/DELETE customer grants）成功后：
 - 本实例立即刷新 30s 内存缓存
 - Postgres 触发 `tools_changed` 通知，其它 gateway 实例 30s 内同步
 - 对所有打开 SSE 会话的 client 推送 `notifications/tools/list_changed`
@@ -497,4 +602,9 @@ Query 参数（都可选）：
 1. **`GET /readyz`**：4 类检查 —— `postgres` / `redis` / `jwks` / `tools` 都 `ok`/`ok 69` 才算网关侧就绪。收到 503 直接告诉我们，不用猜是哪一层。
 2. **`error.data.trace_id`**（未来版本加）：每次 `tools/call` 响应里都会带 `trace_id`；遇到 `-32603` 时把这个 id 给网关侧就能反查全链路。当前版本先记 `jsonrpc id` + 你侧的 request id 即可。
 
-**不要**直接连网关的 Postgres / Redis / 下游后端去排障；这些都是网关内部实现，你只需要面向 `/mcp` 这一个端点。工具增删、权限调整、审计查询都由网关侧 SRE 负责。
+对于 `customer_code` 相关的 `401`，先看响应体 `detail`：
+- `unknown customer_code: ...` → 该客户在工单系统不存在或已删除，找运维确认。
+- `gongdan upstream error: ...` → 工单系统临时不可达，稍后重试；若持续出现通知网关侧 SRE。
+- `customer_code present but gongdan is not configured` → 网关部署环境变量缺失（`GONGDAN_API_BASE` / `GONGDAN_API_KEY`），直接报运维。
+
+**不要**直接连网关的 Postgres / Redis / 工单系统 / 下游后端去排障；这些都是网关内部实现，你只需要面向 `/mcp` 这一个端点。工具增删、权限调整、审计查询都由网关侧 SRE 负责。

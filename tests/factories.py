@@ -14,6 +14,10 @@ def make_auth_ctx(
     token: str = "raw-bearer",
     email: str | None = "test@example.com",
     name: str | None = "Test User",
+    customer_code: str | None = None,
+    customer_id: str | None = None,
+    customer_tier: str | None = None,
+    customer_queue_type: str | None = None,
 ) -> AuthContext:
     return AuthContext(
         user_id=user_id,
@@ -21,6 +25,10 @@ def make_auth_ctx(
         raw_token=token,
         email=email,
         name=name,
+        customer_code=customer_code,
+        customer_id=customer_id,
+        customer_tier=customer_tier,
+        customer_queue_type=customer_queue_type,
     )
 
 
@@ -39,6 +47,7 @@ def make_tool_view(
     auth_prefix: str = "",
     input_schema: dict[str, Any] | None = None,
     roles: frozenset[str] | None = None,
+    customer_codes: frozenset[str] | None = None,
 ) -> ToolView:
     return ToolView(
         id=id,
@@ -66,4 +75,5 @@ def make_tool_view(
             "required": ["query"],
         },
         roles=roles if roles is not None else frozenset({"cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer"}),
+        customer_codes=customer_codes if customer_codes is not None else frozenset(),
     )

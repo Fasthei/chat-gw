@@ -6,7 +6,12 @@ from contextlib import asynccontextmanager
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 
-from app.admin import build_audit_router, build_grants_router, build_tools_router
+from app.admin import (
+    build_audit_router,
+    build_customer_grants_router,
+    build_grants_router,
+    build_tools_router,
+)
 from app.api.errors import auth_error_handler
 from app.api.health import build_health_router
 from app.audit import AuditWriter
@@ -16,6 +21,7 @@ from app.auth.jwt_verify import JwtVerifier
 from app.db.engine import async_session, dispose_engine
 from app.db.notify import PgNotifyListener
 from app.dispatchers import build_dispatcher_registry, build_http_client
+from app.external import GongdanClient
 from app.mcp.handler import McpHandler
 from app.mcp.sse import build_sse_router
 from app.mcp.streamable import build_streamable_router
@@ -80,6 +86,14 @@ async def lifespan(app: FastAPI):
         ttl_sec=settings.role_cache_ttl_sec,
     )
 
+    gongdan_client = GongdanClient(
+        base_url=settings.gongdan_api_base,
+        api_key=settings.gongdan_api_key,
+        timeout_sec=settings.gongdan_timeout_sec,
+    )
+    app.state.gongdan_client = gongdan_client
+    app.state.gongdan_customer_claim = settings.gongdan_customer_claim
+
     tool_cache = ToolCache(ttl_sec=settings.registry_cache_ttl_sec)
     registry = ToolRegistry(tool_cache)
     app.state.tool_cache = tool_cache
@@ -132,6 +146,10 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
         await http_client.aclose()
+        try:
+            await gongdan_client.close()
+        except Exception:
+            pass
         if jwks_cache is not None:
             await jwks_cache.close()
         await casdoor.close()
@@ -156,6 +174,7 @@ def create_app() -> FastAPI:
     # /admin/* — cloud_admin only (enforced per-router via require_role)
     app.include_router(build_tools_router())
     app.include_router(build_grants_router())
+    app.include_router(build_customer_grants_router())
     app.include_router(build_audit_router())
     return app
 

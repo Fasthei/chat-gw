@@ -53,7 +53,10 @@ class Tool(Base):
     created_by: Mapped[str | None] = mapped_column(String(128))
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
-    grants: Mapped[list[ToolRoleGrant]] = relationship(
+    grants: Mapped[list["ToolRoleGrant"]] = relationship(
+        back_populates="tool", lazy="selectin", cascade="all, delete-orphan"
+    )
+    customer_grants: Mapped[list["ToolCustomerGrant"]] = relationship(
         back_populates="tool", lazy="selectin", cascade="all, delete-orphan"
     )
 
@@ -74,6 +77,29 @@ class ToolRoleGrant(Base):
     granted_by: Mapped[str | None] = mapped_column(String(128))
 
     tool: Mapped[Tool] = relationship(back_populates="grants")
+
+
+class ToolCustomerGrant(Base):
+    """Customer-scoped tool grants. Keyed by the gongdan `customerCode`
+    (e.g. ``CUST-XXXXXXXX``). OR-merged with role grants at read time so a
+    principal sees a tool if *either* (a) one of their roles is granted the
+    tool, or (b) their customer_code is granted the tool."""
+
+    __tablename__ = "tool_customer_grants"
+    __table_args__ = {"schema": "chat_gw"}
+
+    tool_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("chat_gw.tools.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    customer_code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    granted_by: Mapped[str | None] = mapped_column(String(128))
+
+    tool: Mapped[Tool] = relationship(back_populates="customer_grants")
 
 
 class ToolAuditLog(Base):

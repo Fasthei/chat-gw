@@ -27,6 +27,11 @@ from app.settings import Settings
 
 log = logging.getLogger(__name__)
 
+# Audit deny_reason string kept stable across the role→principal migration
+# so downstream dashboards and alerts don't break. Semantically this now
+# means "no role grant AND no customer_code grant", not purely "no role".
+_DENY_NOT_FOUND_OR_NO_GRANT = "not_found_or_no_role"
+
 
 class McpHandler:
     """Dispatches MCP JSON-RPC methods shared by /mcp and /mcp/sse."""
@@ -91,7 +96,9 @@ class McpHandler:
         )
 
     async def _tools_list(self, req_id: Any, ctx: AuthContext) -> dict[str, Any]:
-        views = await self._registry.list_for_roles(ctx.roles)
+        views = await self._registry.list_for_principal(
+            ctx.roles, ctx.customer_code
+        )
         payload = [
             {
                 "name": t.name,
@@ -115,7 +122,9 @@ class McpHandler:
         trace_id = uuid.uuid4()
         started = time.monotonic()
 
-        tool = await self._registry.find_authorized(name, ctx.roles)
+        tool = await self._registry.find_authorized_for_principal(
+            name, ctx.roles, ctx.customer_code
+        )
         if tool is None:
             await self._audit.log(
                 trace_id=trace_id,
@@ -123,9 +132,9 @@ class McpHandler:
                 tool_name=name,
                 arguments=arguments,
                 status="denied",
-                deny_reason="not_found_or_no_role",
+                deny_reason=_DENY_NOT_FOUND_OR_NO_GRANT,
                 error_code=TOOL_NOT_FOUND,
-                error_kind="not_found_or_no_role",
+                error_kind=_DENY_NOT_FOUND_OR_NO_GRANT,
             )
             return jsonrpc_error(req_id, TOOL_NOT_FOUND, f"tool '{name}' not found")
 

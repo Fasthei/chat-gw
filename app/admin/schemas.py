@@ -97,6 +97,34 @@ class GrantPutOut(BaseModel):
     granted: bool
 
 
+# ─── /admin/tool-customer-grants ─────────────────────────────────────
+
+CUSTOMER_CODE_PATTERN = r"^[A-Za-z0-9_-]{1,32}$"
+
+
+class CustomerGrantPair(BaseModel):
+    customer_code: str
+    tool_name: str
+
+
+class CustomerGrantsListResponse(BaseModel):
+    grants: list[CustomerGrantPair]
+
+
+class CustomerGrantPutIn(BaseModel):
+    customer_code: str = Field(
+        min_length=1, max_length=32, pattern=CUSTOMER_CODE_PATTERN
+    )
+    tool_name: str = Field(min_length=1, max_length=128)
+    granted: bool
+
+
+class CustomerGrantPutOut(BaseModel):
+    customer_code: str
+    tool_name: str
+    granted: bool
+
+
 # ─── /admin/audit ────────────────────────────────────────────────────
 
 Outcome = Literal["allowed", "denied", "error", "ok"]
