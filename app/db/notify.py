@@ -4,10 +4,13 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 log = logging.getLogger(__name__)
 
 OnChangeCallback = Callable[[str], Awaitable[None]]
+
+_SSL_TRUTHY = {"true", "1", "yes", "on", "t"}
 
 
 class PgNotifyListener:
@@ -24,7 +27,7 @@ class PgNotifyListener:
         on_change: OnChangeCallback,
         reconnect_delay_sec: float = 2.0,
     ) -> None:
-        self._dsn = _sqlalchemy_to_asyncpg(dsn)
+        self._dsn, self._connect_kwargs = _parse_asyncpg_dsn(dsn)
         self._channel = channel
         self._on_change = on_change
         self._reconnect_delay = reconnect_delay_sec
@@ -55,7 +58,7 @@ class PgNotifyListener:
         while not self._stop.is_set():
             conn = None
             try:
-                conn = await asyncpg.connect(self._dsn)
+                conn = await asyncpg.connect(self._dsn, **self._connect_kwargs)
                 await conn.add_listener(self._channel, self._handle)
                 log.info("pg-listen started on %s", self._channel)
                 while not self._stop.is_set():
@@ -79,8 +82,25 @@ class PgNotifyListener:
             log.warning("pg-notify callback failed (no running loop)")
 
 
-def _sqlalchemy_to_asyncpg(dsn: str) -> str:
-    """Convert SQLAlchemy-style DSN (postgresql+asyncpg://...) to raw DSN."""
+def _parse_asyncpg_dsn(dsn: str) -> tuple[str, dict[str, Any]]:
+    """Convert a SQLAlchemy-style DSN to a raw asyncpg DSN + connect kwargs.
+
+    asyncpg.connect(dsn) does not recognise ``ssl`` as a URL parameter — it
+    forwards unknown params as Postgres ``server_settings`` and the server
+    rejects ``SET ssl = ...`` with ``parameter "ssl" cannot be changed now``.
+    SQLAlchemy's asyncpg dialect would translate ``ssl=`` into the proper
+    connect kwarg; the raw path here must do the same.
+    """
     if dsn.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + dsn[len("postgresql+asyncpg://") :]
-    return dsn
+        dsn = "postgresql://" + dsn[len("postgresql+asyncpg://") :]
+    parsed = urlparse(dsn)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    kwargs: dict[str, Any] = {}
+    remaining: list[tuple[str, str]] = []
+    for key, value in query:
+        if key == "ssl":
+            kwargs["ssl"] = "require" if value.lower() in _SSL_TRUTHY else value
+        else:
+            remaining.append((key, value))
+    cleaned = urlunparse(parsed._replace(query=urlencode(remaining, doseq=True)))
+    return cleaned, kwargs
