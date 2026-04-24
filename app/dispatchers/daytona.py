@@ -159,10 +159,23 @@ class DaytonaAdapter(Dispatcher):
                 _map_sdk_error(exc, where="code_run")
         finally:
             if sandbox is not None:
-                try:
-                    await client.delete(sandbox, timeout=30)
-                except Exception as cleanup_exc:
-                    log.warning("daytona sandbox cleanup failed: %s", cleanup_exc)
+                sbid = getattr(sandbox, "id", "<unknown>")
+                for attempt in (1, 2):
+                    try:
+                        await client.delete(sandbox, timeout=30)
+                        break
+                    except Exception as cleanup_exc:
+                        if attempt == 1:
+                            log.warning(
+                                "daytona delete attempt 1 failed (id=%s): %s",
+                                sbid, cleanup_exc,
+                            )
+                            await asyncio.sleep(1)
+                        else:
+                            log.error(
+                                "daytona delete GIVING UP (id=%s, ORPHANED): %s",
+                                sbid, cleanup_exc,
+                            )
             try:
                 await client.close()
             except Exception:

@@ -212,3 +212,108 @@ def test_map_sdk_error_maps_validation():
         _map_sdk_error(daytona_sdk.DaytonaValidationError("bad"), where="create")
     assert exc.value.mcp_code == -32602
     assert exc.value.kind == "upstream_bad_request"
+
+
+# ─── Cleanup retry behaviour ─────────────────────────────────────────
+
+def _sdk_with_client(mock_client):
+    """Build a patched `_require_sdk` return value around `mock_client`."""
+    sdk_module = MagicMock()
+    sdk_module.AsyncDaytona = MagicMock(return_value=mock_client)
+    sdk_module.DaytonaConfig = MagicMock()
+    sdk_module.CreateSandboxFromSnapshotParams = MagicMock()
+    return sdk_module
+
+
+def _successful_client(sandbox_id: str = "sb-abc123"):
+    exec_response = MagicMock(exit_code=0, result="ok\n", artifacts=None)
+    mock_process = MagicMock()
+    mock_process.code_run = AsyncMock(return_value=exec_response)
+    mock_sandbox = MagicMock(process=mock_process, id=sandbox_id)
+    mock_client = MagicMock()
+    mock_client.create = AsyncMock(return_value=mock_sandbox)
+    mock_client.close = AsyncMock(return_value=None)
+    return mock_client
+
+
+@pytest.mark.asyncio
+async def test_cleanup_first_try_success_no_retry(monkeypatch, caplog):
+    monkeypatch.setenv("DAYTONA_API_BASE", "https://real.daytona/api")
+    monkeypatch.setenv("DAYTONA_API_TOKEN", "dtn_live_real")
+
+    mock_client = _successful_client()
+    mock_client.delete = AsyncMock(return_value=None)
+
+    with patch("app.dispatchers.daytona._require_sdk") as sdk_getter:
+        sdk_getter.return_value = _sdk_with_client(mock_client)
+        inv = ToolInvocation(
+            tool=_sandbox_tool(), arguments={"code": "print(1)"},
+            auth=make_auth_ctx(), trace_id=uuid4(),
+        )
+        await _adapter().invoke(inv)
+
+    assert mock_client.delete.await_count == 1
+    # No warning / error emitted for a clean first-try delete.
+    assert not any("attempt 1 failed" in r.message for r in caplog.records)
+    assert not any("ORPHANED" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retries_once_on_transient_failure(monkeypatch, caplog):
+    monkeypatch.setenv("DAYTONA_API_BASE", "https://real.daytona/api")
+    monkeypatch.setenv("DAYTONA_API_TOKEN", "dtn_live_real")
+    import logging as _logging
+    caplog.set_level(_logging.WARNING, logger="app.dispatchers.daytona")
+
+    mock_client = _successful_client(sandbox_id="sb-retry-42")
+    # First delete fails, second succeeds.
+    mock_client.delete = AsyncMock(side_effect=[Exception("boom"), None])
+
+    with patch("app.dispatchers.daytona._require_sdk") as sdk_getter, \
+         patch("app.dispatchers.daytona.asyncio.sleep", new=AsyncMock()):
+        sdk_getter.return_value = _sdk_with_client(mock_client)
+        inv = ToolInvocation(
+            tool=_sandbox_tool(), arguments={"code": "print(1)"},
+            auth=make_auth_ctx(), trace_id=uuid4(),
+        )
+        result = await _adapter().invoke(inv)
+
+    assert mock_client.delete.await_count == 2
+    warns = [r for r in caplog.records if r.levelname == "WARNING"
+             and "attempt 1 failed" in r.message]
+    assert warns, "expected warning after first failed delete"
+    errors = [r for r in caplog.records if r.levelname == "ERROR"
+              and "ORPHANED" in r.message]
+    assert not errors, "should not log ORPHANED when retry succeeds"
+    # Main business result is still returned normally.
+    assert '"exit_code": 0' in result.content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_gives_up_after_both_attempts_fail(monkeypatch, caplog):
+    monkeypatch.setenv("DAYTONA_API_BASE", "https://real.daytona/api")
+    monkeypatch.setenv("DAYTONA_API_TOKEN", "dtn_live_real")
+    import logging as _logging
+    caplog.set_level(_logging.WARNING, logger="app.dispatchers.daytona")
+
+    mock_client = _successful_client(sandbox_id="sb-ghost-99")
+    mock_client.delete = AsyncMock(
+        side_effect=[Exception("boom-1"), Exception("boom-2")]
+    )
+
+    with patch("app.dispatchers.daytona._require_sdk") as sdk_getter, \
+         patch("app.dispatchers.daytona.asyncio.sleep", new=AsyncMock()):
+        sdk_getter.return_value = _sdk_with_client(mock_client)
+        inv = ToolInvocation(
+            tool=_sandbox_tool(), arguments={"code": "print(1)"},
+            auth=make_auth_ctx(), trace_id=uuid4(),
+        )
+        # Cleanup failure must NOT mask a successful code_run.
+        result = await _adapter().invoke(inv)
+
+    assert mock_client.delete.await_count == 2
+    orphan_errors = [r for r in caplog.records if r.levelname == "ERROR"
+                     and "ORPHANED" in r.message and "sb-ghost-99" in r.message]
+    assert orphan_errors, "expected ORPHANED error log with sandbox id"
+    # Successful payload still surfaces.
+    assert '"exit_code": 0' in result.content[0]["text"]
