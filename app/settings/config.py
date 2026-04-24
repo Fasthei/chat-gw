@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
     server_name: str = "chat-gw"
-    server_version: str = "0.1.0"
+    server_version: str = "0.2.1"
 
     jwt_dev_secret: str | None = None
     jwt_dev_algorithm: str = "HS256"
