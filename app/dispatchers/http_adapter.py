@@ -183,6 +183,15 @@ def _build_headers(inv: ToolInvocation, extra: dict[str, str]) -> dict[str, str]
                     kind="config_error",
                 )
         headers[auth_header] = (inv.tool.auth_prefix or "") + token
+    # Forward the resolved customer_code so downstream services (notably
+    # gongdan) can re-scope ADMIN-looking service-key requests back to the
+    # originating customer. Without this, a customer-authenticated call
+    # that fans out through a service_key tool is indistinguishable from
+    # a real internal ADMIN call — which is the越权 we are fixing here.
+    # The corresponding gongdan-side enforcement is in a sibling PR.
+    customer_code = inv.auth.customer_code
+    if customer_code:
+        headers["X-Customer-Code"] = customer_code
     headers.update(extra)
     return headers
 
