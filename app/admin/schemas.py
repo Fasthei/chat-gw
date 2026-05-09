@@ -73,7 +73,7 @@ class ToolPatchIn(BaseModel):
 
 # ─── /admin/tool-role-grants ─────────────────────────────────────────
 
-Role = Literal["cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer"]
+Role = Literal["cloud_admin", "cloud_ops", "cloud_finance", "cloud_viewer", "cloud_sales"]
 
 
 class GrantPair(BaseModel):
